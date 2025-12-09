@@ -82,80 +82,19 @@ graph LR
 
 -----
 
-## 🧪 Usage & Testing Scenarios
 
-We have included scripts to verify the system's robustness against data duplication.
+## 1\. Project Pipeline
 
-### 1\. The "Noise" Test (Data Generation)
+Before executing the pipeline, we established the system architecture and project structure.
 
-Generate a mathematically verifiable dataset: **10,000 unique records** + **1,000 intentional duplicates**.
+### **System Architecture**
 
-```bash
-python generate_static_data.py
-# Output: Created test_data_10k.json (11,000 records total)
-```
+The pipeline follows a Lambda Architecture, splitting data into a Speed Layer (ClickHouse) and a Batch/Storage Layer (Delta Lake) as mentioned above.
 
-### 2\. The "Backfill" Simulation (Ingestion)
 
-Simulate a massive historical data load.
+### **Project Structure**
 
-```bash
-python bulk_import.py
-```
-
-  * **Observation:** Check Spark logs. It will process 11,000 records but only write \~10,000 unique records to storage.
-
-### 3\. The "Replay Attack" (Proof of Idempotency)
-
-Simulate a catastrophic upstream failure where data is re-sent. **Run the bulk import again:**
-
-```bash
-python bulk_import.py
-```
-
-  * **Result:** Despite receiving 11,000 "new" messages, the **Delta Lake row count remains unchanged**. This proves the Idempotency logic is working.
-
-### 4\. Analysis
-
-Generate a statistical report on batch performance and skewness.
-
-```bash
-# Capture logs
-docker logs spark-job > spark_logs.txt
-# Run analysis
-python analyze_batch_performance.py
-```
-
------
-
-## 🧠 Technical Deep Dive
-
-### The Deduplication Logic (`spark_consumer.py`)
-
-The core of this project is the `MERGE` operation. Instead of blindly appending data, we perform a Left Join between the **Incoming Batch (Source)** and **Historical Data (Target)**.
-
-```python
-# Actual Code Implementation
-delta_table.alias("target").merge(
-    delta_df.alias("source"),
-    "target.dedup_key = source.dedup_key"  # The Anchor
-)
-.whenMatchedUpdateAll()    # If key exists -> Update (No-Op) -> 0 Duplicates
-.whenNotMatchedInsertAll() # If key is new -> Insert -> New Data
-.execute()
-```
-
-### Handling Data Skew
-
-The pipeline is designed to handle "bursty" traffic.
-
-  * **Idle:** 0 records/sec.
-  * **Spike:** 11,000 records/sec.
-  * **Mitigation:** In production, `maxOffsetsPerTrigger` can be enabled to smooth these spikes into consistent micro-batches.
-
------
-
-## 📂 Project Structure
+The codebase is organized into modular scripts for ingestion (`bulk_import.py`), processing (`spark_consumer.py`), and infrastructure (`docker-compose.yml`).
 
 ```text
 .
@@ -169,6 +108,104 @@ The pipeline is designed to handle "bursty" traffic.
 ├── analyze_batch_performance.py # Log analysis tool (Calculates Skewness & Throughput)
 └── README.md                    # Project documentation
 ```
+
+-----
+
+## 2\. Phase 1: Infrastructure & Injection
+
+### **Kafka Topic Verification**
+
+We verified that our topics (`raw_events` and `processed_events`) were correctly created with **4 Partitions** and **Replication Factor 2**. This partition count allows for parallel processing across our brokers.
+
+![Description of Image](SS/image.png)
+
+-----
+
+## 3\. Phase 2: Spark Processing & The "Noise Test"
+
+We ingested an initial dataset of **11,000 records** containing **1,000 intentional duplicates**.
+
+### **Initial Deduplication Result (Delta Lake)**
+
+After the first batch processing, we queried the Delta Lake storage. Spark's in-memory `dropDuplicates` logic successfully removed the noise.
+
+  * **Expected Unique Count:** 9,953
+  * **Actual Result:** 9,953
+
+![Description of Image](SS/image(2).png)
+
+
+### **Data Verification**
+
+We inspected the data sample to ensure the composite keys and timestamps were parsing correctly.
+
+![Description of Image](SS/image(3).png)
+
+### **Consistency Check**
+
+To confirm stability, we ran the count query again. The result remained consistent at **9,953**, proving that no stray duplicates were being appended.
+
+![Description of Image](SS/image(4).png)
+
+![Description of Image](SS/image(5).png)
+
+-----
+
+## 4\. Phase 3: The "New Data" Test (+15 Records)
+
+To prove the pipeline handles new data correctly while blocking replays, we injected **15 new, unique records**.
+
+### **Spark Update Verification**
+
+After injecting the 15 records, we queried Delta Lake again.
+
+  * **Previous Count:** 9,953
+  * **New Records:** +15
+  * **Expected Total:** 9,968
+  * **Actual Result:** **9,968**
+
+![Description of Image](SS/image(6).png)
+
+This confirms that legitimate new data is inserted immediately (`whenNotMatchedInsertAll`).
+
+-----
+
+## 5\. Phase 4: ClickHouse Verification (Eventual Consistency)
+
+Finally, we verified the data flow into our Speed Layer (ClickHouse).
+
+### **Initial Sync State**
+
+We checked the ClickHouse table `events_table`. It perfectly matched the initial Spark count.
+
+  * **Count:** 9,953
+
+![Description of Image](SS/image(7).png)
+
+### **The "Dirty" State (Background Merge)**
+
+ClickHouse is optimized for write speed, so it accepts duplicates initially. Before the background merge occurred, the raw count showed extra records (duplicates + new data) pending cleanup.
+
+  * **Raw Count:** 10,408 (Indicates duplicates exist in the table parts).
+
+![Description of Image](SS/image(8).png)
+
+### **The Final Clean State**
+
+By using the `FINAL` keyword (`SELECT count(*) FROM events_table FINAL`), we forced ClickHouse to apply the deduplication logic at query time.
+
+  * **Result:** **9,968**
+
+![Description of Image](SS/image(9).png)
+
+This proves that ClickHouse eventually reaches the same consistent state as Delta Lake.
+
+### **Data Inspection**
+
+A final look at the raw data in ClickHouse confirms that `dedup_key` and versions are tracking correctly.
+
+![Description of Image](SS/image(10).png)
+
 
 -----
 ## 👥 Contributors
