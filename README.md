@@ -19,7 +19,6 @@ This pipeline solves this by implementing a **Deterministic Deduplication Strate
     2.  **Storage-Level:** Delta Lake performs `MERGE` (Upsert) operations to reject historical duplicates.
     3.  **Analytical:** ClickHouse uses `ReplacingMergeTree` for eventual consistency.
   * **🔑 Deterministic Identity:** Uses `MD5(User + Event + Timestamp)` to generate immutable event IDs.
-  * **⚡ Handling Data Skew:** Engineered to handle massive throughput spikes (11k records/sec) followed by idle periods.
 
 -----
 
@@ -65,7 +64,7 @@ graph LR
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/yourusername/kafka_real_time.git
+    git clone https://github.com/Riyag012/kafka_real_time.git
     cd kafka_real_time
     ```
 
