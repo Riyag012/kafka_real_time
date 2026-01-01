@@ -152,18 +152,24 @@ services:
         
         echo 'Creating ClickHouse database...';
         clickhouse-client --host clickhouse --user default --password password -q 'CREATE DATABASE IF NOT EXISTS spark_db';
-        
-        echo 'Creating main events table...';
-        clickhouse-client --host clickhouse --user default --password password -q \"
-          CREATE TABLE IF NOT EXISTS spark_db.events_table (
-            user_id UInt64,
-            event String,
-            timestamp DateTime
-          ) ENGINE = MergeTree()
-          ORDER BY (timestamp, user_id)
+
+        echo 'Applying Schema Changes (ReplacingMergeTree & Deduplication)...';
+        clickhouse-client --host clickhouse --user default --password password --multiquery -q \"
+            DROP TABLE IF EXISTS spark_db.events_mv;
+            DROP TABLE IF EXISTS spark_db.events_table;
+
+            CREATE TABLE spark_db.events_table (
+                user_id UInt64,
+                event String,
+                timestamp DateTime,
+                dedup_key String,
+                version UInt32 DEFAULT 1
+            ) ENGINE = ReplacingMergeTree(version)
+            ORDER BY (dedup_key)
+            SETTINGS index_granularity = 8192;
         \";
         
-        echo 'Creating Kafka engine table...';
+        echo 'Ensuring Kafka Engine table exists...';
         clickhouse-client --host clickhouse --user default --password password -q \"
           CREATE TABLE IF NOT EXISTS spark_db.events_kafka_pipe (
             user_id UInt64,
@@ -178,15 +184,18 @@ services:
               kafka_num_consumers = 2
         \";
         
-        echo 'Creating materialized view...';
+        echo 'Creating Materialized View with MD5 Hash...';
         clickhouse-client --host clickhouse --user default --password password -q \"
-          CREATE MATERIALIZED VIEW IF NOT EXISTS spark_db.events_mv
+          CREATE MATERIALIZED VIEW spark_db.events_mv
           TO spark_db.events_table
-          AS SELECT 
+          AS
+          SELECT 
             user_id,
             event,
-            parseDateTimeBestEffort(toString(timestamp)) as timestamp
-          FROM spark_db.events_kafka_pipe
+            parseDateTimeBestEffort(toString(timestamp)) as timestamp,
+            MD5(concat(toString(user_id), '_', event, '_', toString(timestamp))) as dedup_key,
+            1 as version
+          FROM spark_db.events_kafka_pipe;
         \";
         
         echo 'ClickHouse setup complete!';
